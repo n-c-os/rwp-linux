@@ -1,0 +1,79 @@
+name: Build RWP Linux x86-64 ISO
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rwp-linux-iso
+  cancel-in-progress: false
+
+jobs:
+  build-iso:
+    name: Debian 13 amd64 / KDE Plasma
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Télécharger le code source
+        uses: actions/checkout@v4
+
+      - name: Libérer de l'espace sur le runner éphémère
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+          docker image prune --all --force || true
+          df -h /
+
+      - name: Vérifier la machine GitHub
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          docker --version
+          bash -n build.sh clean.sh
+          df -h /
+
+      - name: Construire l'ISO via Debian 13 natif x86-64
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged \
+            --volume "$GITHUB_WORKSPACE:/rwp:rw" \
+            --workdir /rwp \
+            docker.io/library/debian:trixie \
+            /bin/bash ./build.sh
+
+      - name: Vérifier l'image construite
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s output/RWP-Linux-0.3-alpha-amd64.iso
+          (cd output && sha256sum -c RWP-Linux-0.3-alpha-amd64.iso.sha256)
+          ls -lh output/*.iso
+
+      - name: Publier l'ISO et sa somme SHA-256
+        uses: actions/upload-artifact@v4
+        with:
+          name: RWP-Linux-0.3-alpha-amd64
+          path: |
+            output/*.iso
+            output/*.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Publier les logs (même en cas d'erreur)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RWP-build-logs
+          path: |
+            output/build.log
+            output/boot-report.txt
+          if-no-files-found: ignore
+          retention-days: 7
