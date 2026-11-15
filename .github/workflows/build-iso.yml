@@ -45,8 +45,14 @@ jobs:
           docker run --rm --privileged \
             --volume "$GITHUB_WORKSPACE:/rwp:rw" \
             --workdir /rwp \
+            --env DEBIAN_FRONTEND=noninteractive \
             docker.io/library/debian:trixie \
-            /bin/bash ./build.sh
+            /bin/bash -c '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates curl
+              exec /bin/bash ./build.sh
+            '
 
       - name: Vérifier l'image construite
         shell: bash
