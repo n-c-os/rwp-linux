@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+# Installer la configuration officielle signée de Flathub dans l'image
+# Cette méthode évite toute dépendance au réseau au 1er démarrage.
+mkdir -p /etc/flatpak/remotes.d
+curl --fail --show-error --silent --location --retry 3 \
+  https://flathub.org/repo/flathub.flatpakrepo \
+  --output /etc/flatpak/remotes.d/flathub.flatpakrepo
+if ! grep -q '^\[Flatpak Repo\]' /etc/flatpak/remotes.d/flathub.flatpakrepo; then
+  echo 'Le fichier téléchargé ne semble pas être un flatpakrepo.' >&2
+  exit 1
+fi
+chmod 0644 /etc/flatpak/remotes.d/flathub.flatpakrepo
