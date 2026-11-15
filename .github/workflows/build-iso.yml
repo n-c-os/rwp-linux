@@ -1,6 +1,7 @@
+
 name: Build RWP Linux x86-64 ISO
 
-on:
+"on":
   workflow_dispatch:
 
 permissions:
@@ -11,16 +12,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-iso:
+  build:
     name: Debian 13 amd64 / KDE Plasma
     runs-on: ubuntu-24.04
     timeout-minutes: 300
 
     steps:
-      - name: Télécharger le code source
-        uses: actions/checkout@v4
-
-      - name: Libérer de l'espace sur le runner éphémère
+      - name: Liberer de l'espace disque
         shell: bash
         run: |
           set -euxo pipefail
@@ -29,40 +27,130 @@ jobs:
           docker image prune --all --force || true
           df -h /
 
-      - name: Vérifier la machine GitHub
+      - name: Construire RWP Linux sans fichiers externes
         shell: bash
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          docker --version
-          bash -n build.sh clean.sh
-          df -h /
-
-      - name: Construire l'ISO via Debian 13 natif x86-64
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --privileged \
-            --volume "$GITHUB_WORKSPACE:/rwp:rw" \
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          docker run --rm -i --privileged \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/rwp" \
             --workdir /rwp \
             --env DEBIAN_FRONTEND=noninteractive \
-            docker.io/library/debian:trixie \
-            /bin/bash -c '
-              set -euo pipefail
-              apt-get update
-              apt-get install -y --no-install-recommends ca-certificates curl
-              exec /bin/bash ./build.sh
-            '
+            docker.io/library/debian:trixie /bin/bash -s <<'IN_CONTAINER' 2>&1 | tee "$GITHUB_WORKSPACE/output/build.log"
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            live-build debootstrap squashfs-tools xorriso isolinux \
+            syslinux-common grub-efi-amd64-bin mtools dosfstools \
+            ca-certificates curl gnupg
 
-      - name: Vérifier l'image construite
+          WORK=/rwp/.rwp-build
+          OUT=/rwp/output
+          mkdir -p "$WORK" "$OUT"
+          cd "$WORK"
+
+          # Projet autonome, sans autres fichiers requis.
+          lb config \
+            --distribution trixie \
+            --architecture amd64 \
+            --binary-image iso-hybrid \
+            --bootloaders "syslinux,grub-efi" \
+            --debian-installer live \
+            --debian-installer-gui true \
+            --archive-areas "main contrib non-free-firmware" \
+            --bootappend-live "boot=live components username=rwp hostname=rwp-linux locales=fr_FR.UTF-8 keyboard-layouts=fr" \
+            --iso-volume "RWP_LINUX_03_AMD64"
+
+          mkdir -p config/package-lists \
+            config/includes.chroot/etc/flatpak/remotes.d \
+            config/includes.chroot/usr/share/rwp-linux
+
+          cat > config/package-lists/10-core.list.chroot <<'PACKAGES_CORE'
+          linux-image-amd64
+          live-boot
+          live-config
+          live-config-systemd
+          sudo
+          locales
+          console-setup
+          ca-certificates
+          network-manager
+          wpasupplicant
+          flatpak
+          pipewire-audio
+          wireplumber
+          bluez
+          udisks2
+          polkitd
+          PACKAGES_CORE
+
+          cat > config/package-lists/20-desktop.list.chroot <<'PACKAGES_DESKTOP'
+          kde-plasma-desktop
+          sddm
+          xserver-xorg
+          kwin-x11
+          plasma-nm
+          plasma-pa
+          dolphin
+          konsole
+          plasma-discover
+          plasma-discover-backend-flatpak
+          PACKAGES_DESKTOP
+
+          cat > config/package-lists/30-apps.list.chroot <<'PACKAGES_APPS'
+          firefox-esr
+          qemu-guest-agent
+          spice-vdagent
+          PACKAGES_APPS
+
+          cat > config/package-lists/40-installer.list.chroot_live <<'PACKAGES_INSTALLER'
+          debian-installer-launcher
+          PACKAGES_INSTALLER
+
+          printf '%s\n' 'RWP Linux 0.3 Alpha (Debian 13 amd64)' > \
+            config/includes.chroot/usr/share/rwp-linux/RELEASE
+
+          curl --fail --show-error --silent --location --retry 3 \
+            https://flathub.org/repo/flathub.flatpakrepo \
+            --output config/includes.chroot/etc/flatpak/remotes.d/flathub.flatpakrepo
+          grep -q '^\[Flatpak Repo\]' config/includes.chroot/etc/flatpak/remotes.d/flathub.flatpakrepo
+
+          echo '== Verification des paquets =='
+          find config/package-lists -maxdepth 1 -type f -print | sort
+          shopt -s nullglob
+          lists=(config/package-lists/*.list.chroot*)
+          (( ${#lists[@]} >= 4 )) || { echo 'Listes de paquets manquantes' >&2; exit 2; }
+          for list in "${lists[@]}"; do
+            while IFS= read -r pkg || [[ -n "$pkg" ]]; do
+              [[ -z "$pkg" || "$pkg" = \#* ]] && continue
+              if ! apt-cache show "$pkg" >/dev/null 2>&1; then
+                echo "Paquet Debian introuvable : $pkg ($list)" >&2
+                exit 2
+              fi
+            done < "$list"
+          done
+
+          echo '== Construction RWP Linux =='
+          lb build
+
+          mapfile -d '' -t images < <(find "$WORK" -maxdepth 1 -type f -name '*.iso' -print0)
+          (( ${#images[@]} == 1 )) || { echo 'ISO absente ou ambiguë' >&2; exit 3; }
+          ISO="$OUT/RWP-Linux-0.3-alpha-amd64.iso"
+          cp -f -- "${images[0]}" "$ISO"
+          (cd "$OUT" && sha256sum "$(basename "$ISO")" > "$(basename "$ISO").sha256")
+          ls -lh "$ISO"
+          IN_CONTAINER
+
+      - name: Verifier la somme SHA-256
         shell: bash
         run: |
           set -euo pipefail
           test -s output/RWP-Linux-0.3-alpha-amd64.iso
           (cd output && sha256sum -c RWP-Linux-0.3-alpha-amd64.iso.sha256)
-          ls -lh output/*.iso
 
-      - name: Publier l'ISO et sa somme SHA-256
+      - name: Publier l'ISO
         uses: actions/upload-artifact@v4
         with:
           name: RWP-Linux-0.3-alpha-amd64
@@ -73,13 +161,11 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-      - name: Publier les logs (même en cas d'erreur)
+      - name: Publier le journal
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: RWP-build-logs
-          path: |
-            output/build.log
-            output/boot-report.txt
+          name: RWP-build-log
+          path: output/build.log
           if-no-files-found: ignore
           retention-days: 7
