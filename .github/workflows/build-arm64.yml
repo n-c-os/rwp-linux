@@ -1,67 +1,3 @@
-name: Build RWP Linux ARM64 ISO
-
-"on":
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: rwp-linux-arm64
-  cancel-in-progress: false
-
-jobs:
-  build:
-    name: Debian 13 arm64 / KDE Plasma
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 240
-
-    steps:
-      - name: Verify ARM64 runner and available disk
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = aarch64
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-          docker image prune --all --force || true
-          df -h /
-
-      - name: Build RWP Linux ARM64 ISO
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/output"
-          docker run --rm -i --privileged \
-            --platform linux/arm64 \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/rwp" \
-            --workdir /rwp \
-            --env DEBIAN_FRONTEND=noninteractive \
-            docker.io/library/debian:trixie /bin/bash -s <<'IN_CONTAINER' 2>&1 | tee "$GITHUB_WORKSPACE/output/build.log"
-          set -Eeuo pipefail
-          test "$(dpkg --print-architecture)" = arm64
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            live-build debootstrap squashfs-tools xorriso \
-            grub-efi-arm64-bin mtools dosfstools ca-certificates curl gnupg
-
-          WORK=/rwp/.rwp-arm64-build
-          OUT=/rwp/output
-          mkdir -p "$WORK" "$OUT"
-          cd "$WORK"
-
-          lb config \
-            --distribution trixie \
-            --architectures arm64 \
-            --linux-flavours arm64 \
-            --binary-image iso-hybrid \
-            --bootloaders grub-efi \
-            --debian-installer live \
-            --debian-installer-gui true \
-            --archive-areas "main contrib non-free-firmware" \
-            --apt-recommends false \
-            --compression gzip \
             --memtest none \
             --bootappend-live "boot=live components username=rwp hostname=rwp-linux locales=fr_FR.UTF-8 keyboard-layouts=fr" \
             --iso-volume "RWP_LINUX_04_ARM64"
@@ -120,10 +56,17 @@ jobs:
             --output config/includes.chroot/etc/flatpak/remotes.d/flathub.flatpakrepo
           grep -q '^\[Flatpak Repo\]' config/includes.chroot/etc/flatpak/remotes.d/flathub.flatpakrepo
 
-          # Fail fast if a package name is wrong.
+          # lb config peut creer live.list.chroot ; verifier les listes RWP par leur nom.
+          echo '== Listes de paquets disponibles =='
+          find config/package-lists -maxdepth 1 -type f -name '*.list.chroot*' -print | sort
+          for expected in 10-core.list.chroot 20-plasma.list.chroot 30-apps.list.chroot 40-installer.list.chroot_live; do
+            if [ ! -s "config/package-lists/$expected" ]; then
+              echo "Liste RWP manquante ou vide : $expected" >&2
+              exit 2
+            fi
+          done
           shopt -s nullglob
           lists=(config/package-lists/*.list.chroot*)
-          (( ${#lists[@]} == 4 )) || { echo 'Package lists missing' >&2; exit 2; }
           for list in "${lists[@]}"; do
             while IFS= read -r pkg || [[ -n "$pkg" ]]; do
               [[ -z "$pkg" || "$pkg" = \#* ]] && continue
